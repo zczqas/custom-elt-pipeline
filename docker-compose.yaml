@@ -25,31 +25,97 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: secret
 
-  elt_script:
-    build:
-      context: ./elt
-      dockerfile: Dockerfile
-    command: [ 'python', 'elt_script.py' ]
+  #  elt_script:
+  #    build:
+  #      context: ./elt
+  #      dockerfile: Dockerfile
+  #    command: [ 'python', 'elt_script.py' ]
+  #    networks:
+  #      - elt_network
+  #    depends_on:
+  #      - source_postgres
+  #      - destination_postgres
+  #
+  #  dbt:
+  #    image: ghcr.io/dbt-labs/dbt-postgres:latest
+  #    command:
+  #      [ 'run', '--profiles-dir', '/root', '--project-dir', '/dbt' ]
+  #    networks:
+  #      - elt_network
+  #    volumes:
+  #      - ./custom_postgres:/dbt
+  #      - ~/.dbt:/root
+  #    depends_on:
+  #      - elt_script
+  #    environment:
+  #      DBT_PROFILE: custom_postgres
+  #      DBT_TARGET: dev
+
+  postgres:
+    image: postgres:latest
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    networks:
+      - elt_network    # Add this line to connect to the elt_network
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 5s
+      retries: 5
+
+  init-airflow:
+    image: apache/airflow:latest
+    depends_on:
+      - postgres
     networks:
       - elt_network
-    depends_on:
-      - source_postgres
-      - destination_postgres
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+    command: >
+      bash -c "airflow db migrate"
 
-  dbt:
-    image: ghcr.io/dbt-labs/dbt-postgres:latest
-    command:
-      [ 'run', '--profiles-dir', '/root', '--project-dir', '/dbt' ]
+  webserver:
+    image: apache/airflow:latest
+    depends_on:
+      init-airflow:
+        condition: service_completed_successfully
     networks:
       - elt_network
     volumes:
-      - ./custom_postgres:/dbt
-      - ~/.dbt:/root
-    depends_on:
-      - elt_script
+      - ./airflow/dags:/opt/airflow/dags
+      - ./elt:/opt/airflow/elt_script
+      - ./custom_postgres:/opt/dbt
+      - ~/.dbt:/root/.dbt
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      DBT_PROFILE: custom_postgres
-      DBT_TARGET: dev
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__API__SECRET_KEY: secret
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    ports:
+      - "8080:8080"
+    command: api-server
+
+  scheduler:
+    image: apache/airflow:latest
+    depends_on:
+      init-airflow:
+        condition: service_completed_successfully
+    networks:
+      - elt_network
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./elt:/opt/airflow/elt_script
+      - ./custom_postgres:/opt/dbt
+      - ~/.dbt:/root/.dbt
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__API__SECRET_KEY: secret
+      #      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: scheduler
 
 networks:
   elt_network:
